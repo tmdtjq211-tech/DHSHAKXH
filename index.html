@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>2.5D Turtle Hunting Bunny</title>
+    <script src="https://cdn.tailwindcss.com"></script>
+    <style>
+        @import url('https://fonts.googleapis.com/css2?family=Jua&display=swap');
+        body {
+            margin: 0;
+            overflow: hidden;
+            background-color: #2c3e50;
+            font-family: 'Jua', sans-serif;
+            touch-action: none;
+            user-select: none;
+        }
+        canvas {
+            display: block;
+            width: 100%;
+            height: 100%;
+        }
+        .message-box {
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            background: linear-gradient(135deg, rgba(255,255,255,0.95), rgba(240,240,240,0.95));
+            padding: 2.5rem;
+            border-radius: 1.5rem;
+            box-shadow: 0 20px 50px rgba(0,0,0,0.5);
+            text-align: center;
+            z-index: 100;
+            border: 4px solid #34495e;
+        }
+        #volume-meter {
+            width: 100%;
+            height: 20px;
+            background: #2c3e50;
+            border-radius: 10px;
+            overflow: hidden;
+            margin: 10px 0;
+            border: 2px solid #fff;
+            position: relative;
+        }
+        #volume-bar {
+            height: 100%;
+            width: 0%;
+            background: linear-gradient(90deg, #4caf50, #ffeb3b, #f44336);
+            transition: width 0.1s;
+        }
+        .threshold-line {
+            position: absolute;
+            top: 0;
+            bottom: 0;
+            left: 15%;
+            width: 4px;
+            background: red;
+            z-index: 10;
+        }
+    </style>
+</head>
+<body>
+
+    <div id="ui-overlay" class="absolute top-5 left-5 text-white pointer-events-none drop-shadow-md z-50">
+        <div class="text-3xl md:text-4xl" id="score-display">사냥한 거북이: 0 / 3</div>
+        <div class="text-xl md:text-2xl mt-1 text-yellow-300" id="stage-display">스테이지: 1</div>
+        <div class="mt-4 w-48 md:w-64">
+            <span class="font-bold text-sm md:text-lg">마이크 (선만 넘으면 반응!)</span>
+            <div id="volume-meter">
+                <div class="threshold-line"></div>
+                <div id="volume-bar"></div>
+            </div>
+        </div>
+    </div>
+
+    <!-- 시작 화면 -->
+    <div id="start-screen" class="message-box w-11/12 max-w-md">
+        <h1 class="text-3xl md:text-5xl mb-4 text-blue-600">2.5D 거북이 사냥꾼 🐰</h1>
+        <p class="mb-6 text-base md:text-xl text-gray-800 leading-relaxed">
+            마이크에 대고 **가볍게 소리내어** 점프하세요!<br>
+            연속으로 세 번 **"아!아!아!"** 지르면 사냥(공격)!<br>
+            📱 폰에서도 즐길 수 있습니다.
+        </p>
+        <button id="start-btn" class="bg-blue-600 hover:bg-blue-700 text-white px-8 md:px-12 py-3 md:py-4 rounded-full text-2xl md:text-3xl transition-all transform hover:scale-105 shadow-lg">
+            사냥 시작!
+        </button>
+    </div>
+
+    <!-- 게임 오버 화면 -->
+    <div id="game-over-screen" class="message-box w-11/12 max-w-md hidden">
+        <h1 class="text-4xl md:text-5xl mb-4 text-red-600">거북이한테 당했습니다!</h1>
+        <p id="final-score" class="text-2xl md:text-3xl mb-8 text-gray-800">최종 사냥: 0마리</p>
+        <button id="restart-btn" class="bg-green-600 hover:bg-green-700 text-white px-8 md:px-12 py-3 md:py-4 rounded-full text-2xl md:text-3xl shadow-lg">
+            다시 도전하기
+        </button>
+    </div>
+
+    <canvas id="gameCanvas"></canvas>
+
+    <script>
+        const canvas = document.getElementById('gameCanvas');
+        const ctx = canvas.getContext('2d');
+        const scoreDisplay = document.getElementById('score-display');
+        const stageDisplay = document.getElementById('stage-display');
+        const volumeBar = document.getElementById('volume-bar');
+        const startScreen = document.getElementById('start-screen');
+        const gameOverScreen = document.getElementById('game-over-screen');
+        const finalScoreText = document.getElementById('final-score');
+
+        // 게임 변수
+        let gameState = 'START';
+        let huntedTurtles = 0;
+        let targetTurtles = 3;
+        let stage = 1;
+        let gameSpeed = 6;
+        let groundOffset = 0;
+        let obstacles = [];
+        let particles = [];
+        let scenery = [];
+        let lastObstacleTime = 0;
+
+        // 오디오 관련
+        let audioContext, analyser, microphone, dataArray;
+        let bgmInterval;
+        const JUMP_THRESHOLD = 15; // 작게 소리내도 반응하도록 임계값 대폭 낮춤
+        let isLoud = false;
+        let screamCount = 0;
+        let lastScreamTime = 0;
+        const SCREAM_WINDOW = 1200; // 연속 지르기 허용 시간 (1.2초)
+
+        const player = {
+            x: 150, y: 0, width: 70, height: 80,
+            vy: 0, gravity: 1.2, isGrounded: false,
+            isAttacking: false, attackTimer: 0
+        };
+
+        function triggerAttack() {
+            if (gameState === 'PLAYING' && !player.isAttacking) {
+                player.isAttacking = true;
+                player.attackTimer = 15; // 공격 지속 프레임
+                createParticles(player.x + player.width, player.y + player.height/2, '#fff', 10, true);
+            }
+        }
+
+        function init() {
+            resize();
+            createScenery();
+            window.addEventListener('resize', resize);
+        }
+
+        function resize() {
+            canvas.width = window.innerWidth;
+            canvas.height = window.innerHeight;
+            player.y = canvas.height - 150 - player.height;
+        }
+
+        // 원근감 있는 배경 요소 생성
+        function createScenery() {
+            for(let i=0; i<15; i++) {
+                scenery.push({
+                    x: Math.random() * canvas.width,
+                    y: canvas.height - 150 - Math.random() * 100, // 지평선 근처
+                    size: Math.random() * 40 + 20,
+                    speed: Math.random() * 1 + 0.5,
+                    type: Math.random() > 0.5 ? 'tree' : 'rock'
+                });
+            }
+        }
+
+        // --- BGM (비트감 있는 레트로 스타일) ---
+        function playBGM() {
+            if (!audioContext) return;
+            const tempo = 140;
+            const step = (60 / tempo) / 2;
+            let count = 0;
+            const melody = [196, 196, 261.63, 196, 329.63, 261.63, 392, 329.63];
+
+            bgmInterval = setInterval(() => {
+                if (gameState !== 'PLAYING') return;
+                const osc = audioContext.createOscillator();
+                const gain = audioContext.createGain();
+                
+                osc.type = 'sawtooth';
+                osc.frequency.setValueAtTime(melody[count % melody.length], audioContext.currentTime);
+                
+                gain.gain.setValueAtTime(0.08, audioContext.currentTime);
+                gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.15);
+                
+                osc.connect(gain);
+                gain.connect(audioContext.destination);
+                
+                osc.start();
+                osc.stop(audioContext.currentTime + 0.15);
+                count++;
+            }, step * 1000);
+        }
+
+        async function setupMicrophone() {
+            try {
+                const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                audioContext = new (window.AudioContext || window.webkitAudioContext)();
+                analyser = audioContext.createAnalyser();
+                microphone = audioContext.createMediaStreamSource(stream);
+                
+                analyser.fftSize = 256;
+                dataArray = new Uint8Array(analyser.frequencyBinCount);
+                microphone.connect(analyser);
+                
+                playBGM();
+                processAudio();
+            } catch (err) {
+                alert("마이크 권한을 허용해야 소리로 점프할 수 있습니다!");
+            }
+        }
+
+        function processAudio() {
+            if (gameState !== 'PLAYING') return;
+
+            analyser.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for(let i=0; i<dataArray.length; i++) sum += dataArray[i];
+            let average = sum / dataArray.length;
+
+            volumeBar.style.width = Math.min(average * 2, 100) + '%';
+            volumeBar.style.backgroundColor = average > JUMP_THRESHOLD ? '#f44336' : '#4caf50';
+            
+            // 3단 고음(연속 소리) 공격 로직
+            if (average > JUMP_THRESHOLD && !isLoud) {
+                isLoud = true;
+                let now = Date.now();
+
+                // 시간이 너무 지났으면 카운트 초기화
+                if (now - lastScreamTime > SCREAM_WINDOW) {
+                    screamCount = 0;
+                }
+
+                screamCount++;
+                lastScreamTime = now;
+
+                if (screamCount === 1) {
+                    // 첫 번째 소리: 점프
+                    if (player.isGrounded) {
+                        let jumpPower = 24;
+                        player.vy = -jumpPower;
+                        player.isGrounded = false;
+                        createParticles(player.x + player.width/2, player.y + player.height, '#ccc', 10);
+                    }
+                } else if (screamCount === 2) {
+                    // 두 번째 소리: 시각적 피드백 (기 모으기 느낌)
+                    createParticles(player.x + player.width/2, player.y + player.height/2, '#ffeb3b', 8);
+                } else if (screamCount >= 3) {
+                    // 세 번째 소리: 공격!
+                    triggerAttack();
+                    screamCount = 0; // 공격 후 초기화
+                }
+
+            } else if (average < JUMP_THRESHOLD - 15) {
+                isLoud = false; // 소리가 줄어들면 다시 인식 가능하도록 초기화
+            }
+
+            requestAnimationFrame(processAudio);
+        }
+
+        // --- 2.5D 그래픽 렌더링 함수들 ---
+
+        function drawShadow(x, y, width, height) {
+            ctx.fillStyle = 'rgba(0, 0, 0, 0.4)';
+            ctx.beginPath();
+            ctx.ellipse(x + width/2, y + height, width/1.5, height/4, 0, 0, Math.PI*2);
+            ctx.fill();
+        }
+
+        function drawBackground() {
+            // 하늘 그라데이션
+            let skyGrad = ctx.createLinearGradient(0, 0, 0, canvas.height - 150);
+            skyGrad.addColorStop(0, '#1a2a6c');
+            skyGrad.addColorStop(0.5, '#b21f1f');
+            skyGrad.addColorStop(1, '#fdbb2d');
+            ctx.fillStyle = skyGrad;
+            ctx.fillRect(0, 0, canvas.width, canvas.height - 150);
+
+            // 지평선 장식 (원경)
+            scenery.forEach(s => {
+                s.x -= s.speed;
+                if (s.x < -100) s.x = canvas.width + 100;
+                
+                ctx.save();
+                ctx.translate(s.x, s.y);
+                if (s.type === 'tree') {
+                    ctx.fillStyle = '#1e3f20';
+                    ctx.beginPath();
+                    ctx.moveTo(0, 0); ctx.lineTo(s.size/2, -s.size); ctx.lineTo(s.size, 0);
+                    ctx.fill();
+                } else {
+                    ctx.fillStyle = '#4a4a4a';
+                    ctx.beginPath();
+                    ctx.arc(s.size/2, 0, s.size/2, Math.PI, 0);
+                    ctx.fill();
+                }
+                ctx.restore();
+            });
+
+            // 원근감 있는 바닥 (2.5D 효과)
+            let groundGrad = ctx.createLinearGradient(0, canvas.height - 150, 0, canvas.height);
+            groundGrad.addColorStop(0, '#3e2723'); // 먼 곳은 어둡게
+            groundGrad.addColorStop(1, '#795548'); // 가까운 곳은 밝게
+            ctx.fillStyle = groundGrad;
+            ctx.fillRect(0, canvas.height - 150, canvas.width, 150);
+
+            // 바닥 그리드 이동 효과
+            ctx.strokeStyle = 'rgba(255, 255, 255, 0.1)';
+            ctx.lineWidth = 2;
+            groundOffset = (groundOffset + gameSpeed) % 40;
+            for(let i = -40; i < canvas.width; i += 40) {
+                ctx.beginPath();
+                // 위(지평선)는 좁게, 아래는 넓게 (원근법)
+                ctx.moveTo(canvas.width/2 + (i - canvas.width/2)*0.2 - groundOffset*0.2, canvas.height - 150);
+                ctx.lineTo(i - groundOffset, canvas.height);
+                ctx.stroke();
+            }
+        }
+
+        function drawRabbit(x, y, vy, isAttacking) {
+            drawShadow(x, y, player.width, player.height);
+
+            ctx.save();
+            ctx.translate(x, y);
+
+            // 공격 시 붉은 이펙트 및 회전
+            if (isAttacking) {
+                ctx.shadowColor = '#ff5252';
+                ctx.shadowBlur = 20;
+                ctx.translate(player.width/2, player.height/2);
+                ctx.rotate(0.2);
+                ctx.translate(-player.width/2, -player.height/2);
+            }
+
+            // 입체감을 위한 몸통 그라데이션
+            let bodyGrad = ctx.createRadialGradient(35, 40, 10, 35, 40, 40);
+            bodyGrad.addColorStop(0, '#ffffff');
+            bodyGrad.addColorStop(1, '#e0e0e0');
+
+            // 귀
+            ctx.fillStyle = '#e0e0e0';
+            ctx.strokeStyle = '#bdbdbd';
+            ctx.lineWidth = 2;
+            let earAngle = vy < 0 ? 0.4 : (vy > 0 ? -0.2 : 0);
+            
+            ctx.beginPath(); ctx.ellipse(20, 15, 10, 30, -earAngle, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+            ctx.beginPath(); ctx.ellipse(50, 15, 10, 30, earAngle, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+
+            // 몸통
+            ctx.fillStyle = bodyGrad;
+            ctx.beginPath(); ctx.roundRect(0, 25, 70, 55, 25); ctx.fill(); ctx.stroke();
+
+            // 얼굴
+            ctx.fillStyle = isAttacking ? '#ff1744' : '#212121';
+            
+            if(isAttacking) {
+                // 화난 눈
+                ctx.beginPath(); ctx.moveTo(20, 45); ctx.lineTo(30, 50); ctx.stroke();
+                ctx.beginPath(); ctx.moveTo(50, 45); ctx.lineTo(40, 50); ctx.stroke();
+                // 무기 (당근 검)
+                ctx.fillStyle = '#ff9800';
+                ctx.fillRect(70, 30, 40, 10);
+                ctx.fillStyle = '#4caf50';
+                ctx.fillRect(110, 25, 10, 20);
+            } else {
+                ctx.beginPath(); ctx.arc(25, 50, 5, 0, Math.PI*2); ctx.fill();
+                ctx.beginPath(); ctx.arc(45, 50, 5, 0, Math.PI*2); ctx.fill();
+            }
+
+            ctx.restore();
+            
+            // 공격 궤적 이펙트
+            if (isAttacking) {
+                ctx.strokeStyle = 'rgba(255, 255, 0, 0.8)';
+                ctx.lineWidth = 5;
+                ctx.beginPath();
+                ctx.arc(x + 70, y + 40, 40, -Math.PI/2, Math.PI/2);
+                ctx.stroke();
+            }
+        }
+
+        function drawTurtle(o) {
+            drawShadow(o.x, o.y, o.width, o.height);
+
+            ctx.save();
+            ctx.translate(o.x, o.y);
+
+            // 입체적인 등딱지
+            let shellGrad = ctx.createRadialGradient(30, 25, 5, 30, 30, 30);
+            shellGrad.addColorStop(0, '#81c784');
+            shellGrad.addColorStop(1, '#2e7d32');
+
+            // 다리
+            ctx.fillStyle = '#558b2f';
+            ctx.beginPath(); ctx.ellipse(15, 50, 8, 12, Math.PI/4, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.ellipse(45, 50, 8, 12, -Math.PI/4, 0, Math.PI*2); ctx.fill();
+
+            // 몸통/머리
+            ctx.beginPath(); ctx.arc(10, 40, 12, 0, Math.PI*2); ctx.fill();
+
+            // 등딱지
+            ctx.fillStyle = shellGrad;
+            ctx.strokeStyle = '#1b5e20';
+            ctx.lineWidth = 3;
+            ctx.beginPath(); ctx.arc(35, 30, 25, 0, Math.PI*2); ctx.fill(); ctx.stroke();
+            
+            // 등딱지 무늬 (육각형 느낌)
+            ctx.strokeStyle = 'rgba(0,0,0,0.3)';
+            ctx.beginPath(); ctx.moveTo(25, 15); ctx.lineTo(45, 15); ctx.lineTo(50, 30); ctx.lineTo(35, 45); ctx.lineTo(20, 30); ctx.closePath(); ctx.stroke();
+
+            // 눈 (무섭게)
+            ctx.fillStyle = '#ffeb3b';
+            ctx.beginPath(); ctx.arc(5, 38, 3, 0, Math.PI*2); ctx.fill();
+
+            ctx.restore();
+        }
+
+        function createParticles(x, y, color, count, isAttack = false) {
+            for(let i=0; i<count; i++) {
+                particles.push({
+                    x, y, 
+                    vx: isAttack ? (Math.random()*10 + 5) : (Math.random()-0.5)*15, 
+                    vy: (Math.random()-0.5)*15,
+                    size: Math.random()*8+3, 
+                    life: 1, 
+                    color
+                });
+            }
+        }
+
+        function spawnObstacle() {
+            const now = Date.now();
+            const interval = 2500 - (stage * 200); // 거북이 등장 간격
+            if (now - lastObstacleTime > Math.max(800, interval + Math.random() * 1000)) {
+                obstacles.push({ x: canvas.width, y: canvas.height - 150 - 60, width: 60, height: 60, isDead: false });
+                lastObstacleTime = now;
+            }
+        }
+
+        // --- 메인 루프 ---
+        function loop() {
+            if (gameState !== 'PLAYING') return;
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            drawBackground();
+
+            // 공격 타이머 감소
+            if (player.isAttacking) {
+                player.attackTimer--;
+                if (player.attackTimer <= 0) player.isAttacking = false;
+            }
+
+            // 토끼 물리 (Y축 궤도)
+            player.vy += player.gravity;
+            player.y += player.vy;
+            const groundY = canvas.height - 150 - player.height;
+            if (player.y > groundY) {
+                player.y = groundY;
+                player.vy = 0;
+                player.isGrounded = true;
+            }
+            
+            drawRabbit(player.x, player.y, player.vy, player.isAttacking);
+
+            // 거북이 관리
+            spawnObstacle();
+            for(let i=obstacles.length-1; i>=0; i--) {
+                let o = obstacles[i];
+                o.x -= gameSpeed;
+                drawTurtle(o);
+
+                // 충돌/사냥 검사 (Hitbox)
+                let distX = (o.x + o.width/2) - (player.x + player.width/2);
+                let distY = (o.y + o.height/2) - (player.y + player.height/2);
+                
+                // 공격 판정 (앞쪽에 넓은 판정)
+                if (player.isAttacking && distX > 0 && distX < 120 && Math.abs(distY) < 60) {
+                    // 거북이 사냥 성공
+                    createParticles(o.x + o.width/2, o.y + o.height/2, '#4caf50', 20); // 초록 파티클
+                    createParticles(o.x + o.width/2, o.y + o.height/2, '#ffeb3b', 10); // 노란 파티클
+                    obstacles.splice(i, 1);
+                    huntedTurtles++;
+                    checkStageClear();
+                    continue; // 삭제 후 다음 루프로
+                } 
+                // 피격 판정 (공격 안할때 부딪힘)
+                else if (!player.isAttacking && Math.abs(distX) < 40 && Math.abs(distY) < 50) {
+                    gameOver();
+                }
+
+                // 화면 밖으로 나감
+                if (o.x < -100) obstacles.splice(i, 1);
+            }
+
+            // 파티클 업데이트
+            for(let i=particles.length-1; i>=0; i--) {
+                let p = particles[i];
+                p.x += p.vx; p.y += p.vy; p.life -= 0.03;
+                if(p.life <= 0) particles.splice(i, 1);
+                else {
+                    ctx.globalAlpha = p.life;
+                    ctx.fillStyle = p.color;
+                    ctx.beginPath(); ctx.arc(p.x, p.y, p.size, 0, Math.PI*2); ctx.fill();
+                }
+            }
+            ctx.globalAlpha = 1;
+
+            // UI 갱신
+            scoreDisplay.innerText = `사냥한 거북이: ${huntedTurtles} / ${targetTurtles}`;
+
+            requestAnimationFrame(loop);
+        }
+
+        function checkStageClear() {
+            if (huntedTurtles >= targetTurtles) {
+                stage++;
+                targetTurtles += 3; // 다음 스테이지 목표 증가
+                gameSpeed += 1.5; // 거북이 빨라짐
+                stageDisplay.innerText = `스테이지: ${stage}`;
+                
+                // 축하 이펙트
+                for(let i=0; i<5; i++) {
+                    setTimeout(() => createParticles(canvas.width/2 + (Math.random()-0.5)*200, 150 + Math.random()*100, '#ffd700', 30), i*200);
+                }
+            }
+        }
+
+        function gameOver() {
+            gameState = 'GAMEOVER';
+            gameOverScreen.classList.remove('hidden');
+            finalScoreText.innerText = `최종 사냥: ${huntedTurtles}마리 (스테이지 ${stage})`;
+            if (bgmInterval) clearInterval(bgmInterval);
+        }
+
+        function startGame() {
+            if (!audioContext) setupMicrophone();
+            else playBGM();
+
+            gameState = 'PLAYING';
+            huntedTurtles = 0; 
+            targetTurtles = 3;
+            stage = 1; 
+            gameSpeed = 6;
+            obstacles = [];
+            player.vy = 0;
+            player.isAttacking = false;
+            screamCount = 0;
+            lastScreamTime = 0;
+            isLoud = false;
+            
+            stageDisplay.innerText = `스테이지: ${stage}`;
+            scoreDisplay.innerText = `사냥한 거북이: ${huntedTurtles} / ${targetTurtles}`;
+            
+            startScreen.classList.add('hidden');
+            gameOverScreen.classList.add('hidden');
+            loop();
+        }
+
+        document.getElementById('start-btn').addEventListener('click', startGame);
+        document.getElementById('restart-btn').addEventListener('click', startGame);
+
+        init();
+    </script>
+</body>
+</html>
