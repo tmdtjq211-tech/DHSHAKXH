@@ -118,7 +118,8 @@
         // 새로 바꾼 더 완벽한 반응 로직용 변수
         let lastActionTime = 0; 
         let screamCount = 0;
-        let lastScreamSequenceTime = 0;
+        let lastScreamTime = 0;
+        let isScreaming = false; // 현재 소리를 내고 있는지 상태 추적
 
         const player = {
             x: 150, y: 0, width: 70, height: 80,
@@ -175,7 +176,8 @@
                 osc.type = 'sawtooth';
                 osc.frequency.setValueAtTime(melody[count % melody.length], audioContext.currentTime);
                 
-                gain.gain.setValueAtTime(0.08, audioContext.currentTime);
+                // 🔊 BGM 볼륨을 대폭 낮춤 (폰 스피커 소리가 마이크로 다시 들어가는 현상 방지)
+                gain.gain.setValueAtTime(0.02, audioContext.currentTime);
                 gain.gain.exponentialRampToValueAtTime(0.001, audioContext.currentTime + 0.15);
                 
                 osc.connect(gain);
@@ -216,21 +218,23 @@
             volumeBar.style.width = Math.min(average * 2, 100) + '%';
             volumeBar.style.backgroundColor = average > 15 ? '#f44336' : '#4caf50';
             
-            // 🔥 스트레스 없는 하이퍼 반응 로직 🔥
-            // 배경 소음을 무시할 정도의 작은 수치(15)만 넘으면 무조건 반응합니다.
-            if (average > 15) {
-                let now = Date.now();
-                
-                // 0.35초(350ms) 쿨타임: '아~~' 하고 길게 내도 다다다닥 뛰지 않게 방지
-                if (now - lastActionTime > 350) { 
-                    lastActionTime = now;
-                    screamCount++;
+            let now = Date.now();
 
-                    // 마지막 소리 낸 지 1.5초가 넘었으면 콤보 초기화
-                    if (now - lastScreamSequenceTime > 1500) {
-                        screamCount = 1;
-                    }
-                    lastScreamSequenceTime = now;
+            // 1초 이상 아무 소리 안 내면 콤보 초기화
+            if (screamCount > 0 && now - lastScreamTime > 1000) {
+                screamCount = 0;
+            }
+            
+            // 🔥 진짜 완벽하게 고친 하이퍼 반응 로직 🔥
+            // 소리가 15를 넘었고, 이전에 조용했다면 (방금 막 앗! 하고 소리를 낸 거라면)
+            if (average > 15 && !isScreaming) {
+                isScreaming = true; // 이제 '소리 내는 중' 상태로 락(Lock)을 검
+                
+                // 너무 빨리 연타되는 것 방지 (0.15초)
+                if (now - lastActionTime > 150) { 
+                    lastActionTime = now;
+                    lastScreamTime = now;
+                    screamCount++;
 
                     if (screamCount >= 3) {
                         // 세 번째 소리: 공격!
@@ -239,12 +243,15 @@
                     } else {
                         // 첫 번째, 두 번째 소리: 점프!
                         if (player.isGrounded) {
-                            player.vy = -24; // 고정된 파워로 시원하게 점프
+                            player.vy = -24; // 시원하게 점프
                             player.isGrounded = false;
                             createParticles(player.x + player.width/2, player.y + player.height, '#ccc', 10);
                         }
                     }
                 }
+            } else if (average < 10) {
+                // 소리가 살짝이라도 작아지면(10 미만) 다음 점프를 할 수 있게 즉시 장전!
+                isScreaming = false;
             }
 
             requestAnimationFrame(processAudio);
